@@ -1,5 +1,4 @@
 local VariableRenamer = {}
-local varenc_names = {}
 local lua_functions = {
     "assert", "collectgarbage", "dofile", "loadfile", "loadstring",
     "ipairs", "pairs", "tonumber", "tostring", "type", "print",
@@ -32,16 +31,17 @@ local name_min, name_max = DEFAULT_MIN_NAME_LENGTH, DEFAULT_MAX_NAME_LENGTH
 local function generateRandomName()
     local len = math.random(name_min, name_max)
     local charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    local name = ""
+    local name = {}
+    -- ensure first char is always a letter (already guaranteed by charset, but be explicit)
     for _ = 1, len do
         local index = math.random(1, #charset)
-        name = name .. charset:sub(index, index)
+        name[#name + 1] = charset:sub(index, index)
     end
-    return name
+    return table.concat(name)
 end
 
 local function replaceUnquoted(input, target, replacement)
-    local placeholder = "!!!"
+    local placeholder = "\1\2\3"
     local protected_input = input:gsub('(["\'])(.-)%1', function(q, content)
         content = content:gsub('\\"', '!@!'):gsub("\\'", "@!@")
         content = content:gsub(target, placeholder)
@@ -61,7 +61,7 @@ local function obfuscateLocalVariables(code)
     local obfuscated_code = code
     for local_vars in code:gmatch(local_var_pattern) do
         for var in local_vars:gmatch("[%w_]+") do
-            if #var > 1 and not varenc_names[var] and not reserved_words[var] then
+            if #var > 1 and not var_map[var] and not reserved_words[var] then
                 var_map[var] = generateRandomName()
             end
         end
@@ -100,7 +100,8 @@ end
 
 function VariableRenamer.process(code, options)
     options = options or {}
-    -- apply custom name length range
+    -- reset per-call to avoid stale mappings across files
+    local varenc_names = {}
     name_min = options.min_length or DEFAULT_MIN_NAME_LENGTH
     name_max = options.max_length or DEFAULT_MAX_NAME_LENGTH
     local renamed_vars = {}
@@ -115,13 +116,12 @@ function VariableRenamer.process(code, options)
                 table.insert(renamed_vars, new_name)
                 table.insert(assignment_lines, new_name .. " = " .. function_name .. ";")
             end
-            obfuscated_code = obfuscated_code:gsub(function_name .. "%(", varenc_names[function_name] .. "(")
+            obfuscated_code = obfuscated_code:gsub(function_name:gsub("[%.%+%-%*%?%[%]%^%$%(%)%%]", "%%%1") .. "%(", varenc_names[function_name] .. "(")
         end
     end
     local local_declaration = #renamed_vars > 0 and "local " .. table.concat(renamed_vars, ", ") or ""
     local assignments = #assignment_lines > 0 and "\n" .. table.concat(assignment_lines, " ") or ""
     local result = local_declaration .. assignments .. "\n" .. obfuscated_code
-    -- reset to defaults
     name_min, name_max = DEFAULT_MIN_NAME_LENGTH, DEFAULT_MAX_NAME_LENGTH
     return result
 end
