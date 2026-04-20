@@ -1,129 +1,173 @@
 local VariableRenamer = {}
-local varenc_names = {}
-local lua_functions = {
-    "assert", "collectgarbage", "dofile", "loadfile", "loadstring",
-    "ipairs", "pairs", "tonumber", "tostring", "type", "print",
-    "_G", "_VERSION", "write", "sort",
-    "math.abs", "math.acos", "math.asin", "math.atan", "math.atan2",
-    "math.ceil", "math.cos", "math.cosh", "math.deg", "math.exp",
-    "math.floor", "math.fmod", "math.frexp", "math.ldexp", "math.log",
-    "math.log10", "math.max", "math.min", "math.modf", "math.pi",
-    "math.pow", "math.rad", "math.random", "math.randomseed", "math.sin",
-    "math.sinh", "math.sqrt", "math.tan", "math.tanh",
-    "string.byte", "string.char", "string.dump", "string.find",
-    "string.format", "string.gmatch", "string.gsub", "string.len",
-    "string.lower", "string.match", "string.rep", "string.reverse",
-    "string.sub", "string.upper",
-    "table.concat", "table.insert", "table.remove", "table.sort",
-    "table.pack", "table.unpack", "game:GetService",
-}
 
-local reserved_words = {
-    ["if"] = true, ["then"] = true, ["else"] = true, ["elseif"] = true, ["end"] = true,
-    ["for"] = true, ["while"] = true, ["do"] = true, ["repeat"] = true, ["until"] = true,
-    ["function"] = true, ["local"] = true, ["return"] = true, ["break"] = true, ["continue"] = true,
-    ["and"] = true, ["or"] = true, ["not"] = true, ["in"] = true, ["nil"] = true,
-    ["true"] = true, ["false"] = true
-}
+-- Using characters that look alike visually: l, I, 1, O, 0
+-- This makes manual deobfuscation extremely tedious
+local CONFUSE_CHARSET = "lIiOo"  -- visually ambiguous
 
-local DEFAULT_MIN_NAME_LENGTH, DEFAULT_MAX_NAME_LENGTH = 8, 12
-local name_min, name_max = DEFAULT_MIN_NAME_LENGTH, DEFAULT_MAX_NAME_LENGTH
-
-local function generateRandomName()
-    local len = math.random(name_min, name_max)
-    local charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    local name = ""
-    for _ = 1, len do
-        local index = math.random(1, #charset)
-        name = name .. charset:sub(index, index)
+local function confuseName(len)
+    len = len or math.random(12, 20)
+    local t = {}
+    -- Must start with a letter (l or I or i or O or o)
+    local starts = {"l","I","i","O","o"}
+    t[1] = starts[math.random(#starts)]
+    for i = 2, len do
+        t[i] = CONFUSE_CHARSET:sub(math.random(1,#CONFUSE_CHARSET),
+                                    math.random(1,#CONFUSE_CHARSET))
+        -- fallback if sub returns empty
+        if t[i] == "" then t[i] = "l" end
     end
+    return table.concat(t)
+end
+
+-- Ensure uniqueness
+local used = {}
+local function uniqueName()
+    local name
+    local attempts = 0
+    repeat
+        name = confuseName()
+        attempts = attempts + 1
+        if attempts > 1000 then
+            -- fallback to longer name
+            name = confuseName(25)
+        end
+    until not used[name]
+    used[name] = true
     return name
 end
 
-local function replaceUnquoted(input, target, replacement)
-    local placeholder = "!!!"
-    local protected_input = input:gsub('(["\'])(.-)%1', function(q, content)
-        content = content:gsub('\\"', '!@!'):gsub("\\'", "@!@")
-        content = content:gsub(target, placeholder)
-        content = content:gsub('!@!', '\\"'):gsub('@!@', "\\'")
-        return q .. content .. q
-    end)
-    local result = protected_input:gsub('(%f[%w_])' .. target .. '(%f[^%w_])', function(before, after)
-        return before .. replacement .. after
-    end)
-    result = result:gsub(placeholder, target)
-    return result
+local reserved_words = {
+    ["if"]=true,["then"]=true,["else"]=true,["elseif"]=true,["end"]=true,
+    ["for"]=true,["while"]=true,["do"]=true,["repeat"]=true,["until"]=true,
+    ["function"]=true,["local"]=true,["return"]=true,["break"]=true,
+    ["and"]=true,["or"]=true,["not"]=true,["in"]=true,["nil"]=true,
+    ["true"]=true,["false"]=true,["goto"]=true,
+}
+
+local lua_builtins = {
+    "assert","collectgarbage","dofile","error","getfenv","getmetatable",
+    "ipairs","load","loadfile","loadstring","next","pairs","pcall",
+    "print","rawequal","rawget","rawlen","rawset","require","select",
+    "setfenv","setmetatable","tonumber","tostring","type","unpack","xpcall",
+    "_G","_VERSION","math","string","table","os","io","coroutine",
+    "debug","package","bit","bit32",
+    "game","workspace","script","Instance","Vector3","Vector2","CFrame",
+    "Color3","UDim","UDim2","TweenInfo","Enum","wait","spawn","delay",
+}
+
+local builtin_set = {}
+for _, b in ipairs(lua_builtins) do builtin_set[b] = true end
+
+-- Safe word-boundary replacement (avoids replacing inside strings)
+local function replaceWord(code, target, replacement)
+    -- pattern: not preceded by word char, not followed by word char
+    return (code:gsub('(%f[%w_])' .. target:gsub("([%(%)%.%%%+%-%*%?%[%^%$])", "%%%1") .. '(%f[^%w_])',
+        function() return replacement end))
 end
 
-local function obfuscateLocalVariables(code)
-    local local_var_pattern = "local%s+([%w_,%s]+)%s*=%s*"
-    local var_map = {}
-    local obfuscated_code = code
-    for local_vars in code:gmatch(local_var_pattern) do
-        for var in local_vars:gmatch("[%w_]+") do
-            if #var > 1 and not varenc_names[var] and not reserved_words[var] then
-                var_map[var] = generateRandomName()
+-- Collect all local variable names declared in the code
+local function collectLocals(code)
+    local vars = {}
+    -- local x, y, z = ...
+    for decl in code:gmatch("local%s+([%w_%s,]+)%s*=") do
+        for v in decl:gmatch("[%w_]+") do
+            if not reserved_words[v] and not builtin_set[v] and #v > 1 then
+                vars[v] = true
             end
         end
     end
-    for original_var, obfuscated_var in pairs(var_map) do
-        obfuscated_code = replaceUnquoted(obfuscated_code, original_var, obfuscated_var)
-    end
-    return obfuscated_code, var_map
-end
-
-local function obfuscateFunctions(code)
-    local func_map = {}
-    local arg_map = {}
-    local obfuscated_code = code
-    for func_name, args in code:gmatch("function%s+([%w_]+)%s*%(([%w_,%s]*)%)") do
-        if not reserved_words[func_name] and not func_map[func_name] then
-            func_map[func_name] = generateRandomName()
+    -- local x (no assignment)
+    for v in code:gmatch("local%s+([%w_]+)%s*\n") do
+        if not reserved_words[v] and not builtin_set[v] and #v > 1 then
+            vars[v] = true
         end
-        for arg in args:gmatch("[%w_]+") do
-            if not reserved_words[arg] and not arg_map[arg] then
-                arg_map[arg] = generateRandomName()
+    end
+    -- function args: function foo(a, b, c)
+    for args in code:gmatch("function%s+[%w_.:]+%s*%(([^)]*)%)") do
+        for v in args:gmatch("[%w_]+") do
+            if not reserved_words[v] and not builtin_set[v] and #v > 0 then
+                vars[v] = true
             end
         end
     end
-    obfuscated_code = obfuscated_code:gsub("function%s+([%w_]+)", function(func_name)
-        return "function " .. (func_map[func_name] or func_name)
-    end)
-    for original_func, obfuscated_func in pairs(func_map) do
-        obfuscated_code = obfuscated_code:gsub(original_func .. "%(", obfuscated_func .. "(")
+    -- anonymous function args
+    for args in code:gmatch("function%s*%(([^)]*)%)") do
+        for v in args:gmatch("[%w_]+") do
+            if not reserved_words[v] and not builtin_set[v] and #v > 0 then
+                vars[v] = true
+            end
+        end
     end
-    for original_arg, obfuscated_arg in pairs(arg_map) do
-        obfuscated_code = replaceUnquoted(obfuscated_code, original_arg, obfuscated_arg)
+    return vars
+end
+
+-- Collect top-level function names
+local function collectFunctions(code)
+    local fns = {}
+    for name in code:gmatch("function%s+([%w_]+)%s*%(") do
+        if not reserved_words[name] and not builtin_set[name] then
+            fns[name] = true
+        end
     end
-    return obfuscated_code
+    for name in code:gmatch("local%s+function%s+([%w_]+)%s*%(") do
+        if not reserved_words[name] and not builtin_set[name] then
+            fns[name] = true
+        end
+    end
+    return fns
 end
 
 function VariableRenamer.process(code, options)
+    used = {}  -- reset per invocation
     options = options or {}
-    -- apply custom name length range
-    name_min = options.min_length or DEFAULT_MIN_NAME_LENGTH
-    name_max = options.max_length or DEFAULT_MAX_NAME_LENGTH
-    local renamed_vars = {}
-    local assignment_lines = {}
-    local obfuscated_code, var_map = obfuscateLocalVariables(code)
-    obfuscated_code = obfuscateFunctions(obfuscated_code)
-    for _, function_name in ipairs(lua_functions) do
-        if string.find(code, function_name, 1, true) then
-            if not varenc_names[function_name] then
-                local new_name = generateRandomName()
-                varenc_names[function_name] = new_name
-                table.insert(renamed_vars, new_name)
-                table.insert(assignment_lines, new_name .. " = " .. function_name .. ";")
-            end
-            obfuscated_code = obfuscated_code:gsub(function_name .. "%(", varenc_names[function_name] .. "(")
+
+    -- Preserve string contents
+    local strings = {}
+    local sidx = 0
+    code = code:gsub('"(.-)"', function(s)
+        sidx = sidx + 1
+        local k = "\0S"..sidx.."\0"
+        strings[k] = '"'..s..'"'
+        return k
+    end)
+    code = code:gsub("'(.-)'", function(s)
+        sidx = sidx + 1
+        local k = "\0S"..sidx.."\0"
+        strings[k] = "'"..s.."'"
+        return k
+    end)
+
+    local varMap = {}
+
+    -- Collect and map locals
+    local locals = collectLocals(code)
+    for v in pairs(locals) do
+        varMap[v] = uniqueName()
+    end
+
+    -- Collect and map functions
+    local fns = collectFunctions(code)
+    for f in pairs(fns) do
+        if not varMap[f] then
+            varMap[f] = uniqueName()
         end
     end
-    local local_declaration = #renamed_vars > 0 and "local " .. table.concat(renamed_vars, ", ") or ""
-    local assignments = #assignment_lines > 0 and "\n" .. table.concat(assignment_lines, " ") or ""
-    local result = local_declaration .. assignments .. "\n" .. obfuscated_code
-    -- reset to defaults
-    name_min, name_max = DEFAULT_MIN_NAME_LENGTH, DEFAULT_MAX_NAME_LENGTH
-    return result
+
+    -- Apply all replacements (longest first to avoid partial matches)
+    local sorted = {}
+    for orig in pairs(varMap) do sorted[#sorted+1] = orig end
+    table.sort(sorted, function(a,b) return #a > #b end)
+
+    for _, orig in ipairs(sorted) do
+        code = replaceWord(code, orig, varMap[orig])
+    end
+
+    -- Restore strings
+    for k, v in pairs(strings) do
+        code = code:gsub(k:gsub("%z","%%z"), function() return v end)
+    end
+
+    return code
 end
 
 return VariableRenamer
