@@ -32,22 +32,6 @@ do
         end
     end
 
-    -- 4. BindableEvent sanity check
-    do
-        local event = Instance.new("BindableEvent")
-        local fired = false
-
-        event.Event:Connect(function()
-            fired = true
-        end)
-
-        event:Fire()
-
-        if not fired then
-            return fail("event system broken")
-        end
-    end
-
     -- 5. debug library validation (safe existence checks only)
     do
         if type(debug) ~= "table" then
