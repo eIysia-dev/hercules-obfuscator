@@ -39,5 +39,3 @@ return anti_tamper_code .. "\n" .. code
 end
 
 return AntiTamper
-
-how come it print "hello" showed up in env log
