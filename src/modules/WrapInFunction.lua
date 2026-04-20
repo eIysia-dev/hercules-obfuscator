@@ -1,7 +1,7 @@
 local Wrapper = {}
 
 function Wrapper.process(code)
-    return "local _args={...} return (function(...) " .. code .. " end)(table.unpack(_args))"
+    return "local f=function(...) " .. code .. " end return f(...)"
 end
 
 return Wrapper
