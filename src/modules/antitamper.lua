@@ -12,24 +12,6 @@ do
         return pcall(fn)
     end
 
-    -- 1. Metatable immutability check (safe form)
-    do
-        local mt = getrawmetatable(game)
-        if not mt then fail("missing metatable") end
-
-        local old = mt.__index
-
-        local ok = safePcall(function()
-            mt.__index = nil
-        end)
-
-        mt.__index = old
-
-        if ok then
-            return fail("metatable writable")
-        end
-    end
-
     -- 2. Coroutine identity check (simplified)
     do
         local co1 = coroutine.create(function() end)
