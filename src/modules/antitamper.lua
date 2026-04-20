@@ -39,18 +39,6 @@ do
         end
     end
 
-    -- 6. Instance hierarchy sanity
-    do
-        local part = Instance.new("Part")
-        local folder = Instance.new("Folder")
-
-        part.Parent = folder
-
-        if part.Parent ~= folder then
-            return fail("instance hierarchy mismatch")
-        end
-    end
-
     -- 7. Protected method sanity (non-invasive)
     do
         local p = Instance.new("Part")
