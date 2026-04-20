@@ -1,61 +1,56 @@
 local AntiTamper = {}
 
 function AntiTamper.process(code)
+    local wrapper = [[
+local function __fail(reason)
+    error("Integrity Check Failed: " .. tostring(reason))
+end
 
-local anti_tamper_code = [[
-do
-    local function fail(reason)
-        return error("Integrity Check Failed: " .. tostring(reason))
-    end
+-- Safe environment (restricted sandbox)
+local env = {
+    print = print,
+    warn = warn,
+    tonumber = tonumber,
+    tostring = tostring,
+    pairs = pairs,
+    ipairs = ipairs,
+    math = math,
+    string = string,
+    table = table,
+    type = type,
+    pcall = pcall,
+    xpcall = xpcall,
+    select = select,
 
-    local function safePcall(fn)
-        return pcall(fn)
-    end
+    -- explicitly blocked
+    os = nil,
+    io = nil,
+    debug = nil,
+    getfenv = nil,
+    setfenv = nil,
+    loadstring = nil,
+    require = require,
+}
 
-    -- 2. Coroutine identity check (simplified)
-    do
-        local co1 = coroutine.create(function() end)
-        local co2 = coroutine.create(function() end)
+-- compile user code
+local fn, err = loadstring(USER_CODE)
+if not fn then
+    __fail("compile error: " .. tostring(err))
+end
 
-        if tostring(co1) == tostring(co2) then
-            return fail("coroutine identity collision")
-        end
-    end
+setfenv(fn, env)
 
-    -- 3. Function identity check
-    do
-        local f1 = function() end
-        local f2 = function() end
-
-        if tostring(f1) == tostring(f2) then
-            return fail("function identity collision")
-        end
-    end
-
-    -- 5. debug library validation (safe existence checks only)
-    do
-        if type(debug) ~= "table" then
-            return fail("debug missing")
-        end
-    end
-
-    -- 7. Protected method sanity (non-invasive)
-    do
-        local p = Instance.new("Part")
-        local ok = pcall(function()
-            return p:GetMass()
-        end)
-
-        if not ok then
-            return fail("protected method failure")
-        end
-    end
-
+local ok, err2 = pcall(fn)
+if not ok then
+    __fail(err2)
 end
 ]]
 
-return anti_tamper_code .. "\n" .. code
+    -- inject user code safely
+    local escaped = code:gsub("\\", "\\\\")
+    wrapper = wrapper:gsub("USER_CODE", string.format("[[%s]]", escaped))
 
+    return wrapper
 end
 
 return AntiTamper
