@@ -1,101 +1,76 @@
 local Compressor = {}
 
 local LUA_KEYWORDS = {
-    "and", "break", "do", "else", "elseif", "end", "false", "for", "function",
-    "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return",
-    "then", "true", "until", "while"
+    "and","break","do","else","elseif","end","false","for","function",
+    "goto","if","in","local","nil","not","or","repeat","return",
+    "then","true","until","while"
 }
 
-local KW_PLACEHOLDER_PRE = "@@KW_"
-local KW_PLACEHOLDER_POST = "_KW@@"
-local STR_PLACEHOLDER_PRE = "@@S_"
-local STR_PLACEHOLDER_POST = "_S@@"
-
 function Compressor.process(code)
-    if type(code) ~= "string" then
-        error("Input code must be a string.", 2)
-    end
-    if #code < 10 or code:match("^[%s%d%p]*$") then
-        return code:match("^%s*(.-)%s*$") or ""
-    end
+    if type(code) ~= "string" then error("Input must be string", 2) end
+    if #code == 0 then return "" end
 
-    local strings = {}
-    local string_count = 0
-    local keywords_map = {}
-
-    local function preserveStrings(c)
-        c = c:gsub("%[(=*)%[(.-)%]%1%]", function(equals, str)
-            string_count = string_count + 1
-            local key = STR_PLACEHOLDER_PRE .. string_count .. STR_PLACEHOLDER_POST
-            strings[key] = "[" .. equals .. "[" .. str .. "]" .. equals .. "]"
-            return key
-        end)
-        c = c:gsub('"(.-)"', function(str)
-            if not str:find("\\", 1, true) and str:find(STR_PLACEHOLDER_PRE, 1, true) then
-                 return '"'..str..'"'
-            end
-            string_count = string_count + 1
-            local key = STR_PLACEHOLDER_PRE .. string_count .. STR_PLACEHOLDER_POST
-            strings[key] = '"' .. str .. '"'
-            return key
-        end)
-        c = c:gsub("('.-')", function(str)
-             if not str:find("\\", 1, true) and str:find(STR_PLACEHOLDER_PRE, 1, true) then
-                 return "'"..str.."'"
-            end
-            string_count = string_count + 1
-            local key = STR_PLACEHOLDER_PRE .. string_count .. STR_PLACEHOLDER_POST
-            strings[key] = str
-            return key
-        end)
-        return c
+    -- Preserve string literals by replacing them with placeholders
+    local preserved = {}
+    local n = 0
+    local function save(s)
+        n = n + 1
+        local k = "\x00P"..n.."\x00"
+        preserved[k] = s
+        return k
     end
 
-    local function preserveKeywords(c)
-        for _, keyword in ipairs(LUA_KEYWORDS) do
-            local placeholder = KW_PLACEHOLDER_PRE .. keyword .. KW_PLACEHOLDER_POST
-            keywords_map[placeholder] = keyword
-            c = c:gsub("([^%w_])(" .. keyword .. ")([^%w_])", "%1"..placeholder.."%3")
-            c = c:gsub("^(" .. keyword .. ")([^%w_])", placeholder.."%2")
-            c = c:gsub("([^%w_])(" .. keyword .. ")$", "%1"..placeholder)
-            c = c:gsub("^(" .. keyword .. ")$", placeholder)
-        end
-        return c
-    end
+    -- Long strings [[ ... ]] and [=[ ... ]=]
+    code = code:gsub("%[(=*)%[(.-)%]%1%]", function(eq, inner)
+        return save("["..eq.."["..inner.."]"..eq.."]")
+    end)
+    -- Double-quoted strings (handle escaped quotes)
+    code = code:gsub('"([^"\\]*(\\.[^"\\]*)*)"', function(s)
+        return save('"'..s..'"')
+    end)
+    -- Single-quoted strings
+    code = code:gsub("'([^'\\]*(\\.[^'\\]*)*)'", function(s)
+        return save("'"..s.."'")
+    end)
 
-    local function restoreKeywords(c)
-        for placeholder, keyword in pairs(keywords_map) do
-             c = string.gsub(c, placeholder, function() return keyword end)
-        end
-        return c
-    end
-
-    local function restoreStrings(c)
-        for i = string_count, 1, -1 do
-            local key = STR_PLACEHOLDER_PRE .. i .. STR_PLACEHOLDER_POST
-            c = string.gsub(c, key, function() return strings[key] end)
-        end
-        return c
-    end
-
-    code = preserveStrings(code)
-    code = preserveKeywords(code)
-
-    code = code:gsub("--%[%[.-%]%]", "")
+    -- Remove long comments
+    code = code:gsub("%-%-%[%[.-%]%]", " ")
+    code = code:gsub("%-%-%[=%[.-%]=%]", " ")
+    -- Remove line comments
     code = code:gsub("%-%-[^\n]*", "")
 
-    code = code:gsub("[\n\r]+", " ")
-    code = code:gsub("%s+", " ")
+    -- Collapse all whitespace runs to single space
+    code = code:gsub("[ \t\r\n]+", " ")
 
-    code = code:gsub("%s*%.%.%s*", "..")
-    code = code:gsub("%s*([%+%-%*/%%\\^#%<%>%~%=%,%;:%(%){}%[%]])%s*", "%1")
-    code = code:gsub("%s*%.%s*", ".")
-    code = code:gsub("%.%.", "..")
+    -- Remove spaces around most punctuation (safe)
+    local punct = {"%(","%)",",%{",",%}","%[","%]","%;",","}
+    for _, p in ipairs({",",";","(",")","{","}"}) do
+        local ep = p:gsub("([%(%)%.%%%+%-%*%?%[%^%$])", "%%%1")
+        code = code:gsub(" *" .. ep .. " *", p)
+    end
 
+    -- Operators: careful — don't merge `not` `and` `or` into identifiers
+    for _, op in ipairs({"%.%.","%.%.%.","%+","%-","%*","%/","%%","%^","#","~=","==","<=",">=","<",">"}) do
+        code = code:gsub(" *(" .. op .. ") *", "%1")
+    end
+    -- = alone (but not == already handled)
+    code = code:gsub(" *([^=~<>!])= *([^=])", "%1=%2")
+
+    -- Ensure keywords are always spaced from alphanumerics
+    for _, kw in ipairs(LUA_KEYWORDS) do
+        code = code:gsub("([%w_])(" .. kw .. ")([^%w_])", "%1 %2%3")
+        code = code:gsub("([^%w_])(" .. kw .. ")([%w_])", "%1%2 %3")
+    end
+
+    -- Trim
     code = code:match("^%s*(.-)%s*$") or ""
 
-    code = restoreKeywords(code)
-    code = restoreStrings(code)
+    -- Restore preserved strings
+    for k, v in pairs(preserved) do
+        -- escape magic chars in key for pattern
+        local pat = k:gsub("(%W)", "%%%1")
+        code = code:gsub(pat, function() return v end)
+    end
 
     return code
 end
