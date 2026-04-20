@@ -1,87 +1,75 @@
--- modules/control_flow_obfuscator.lua (improved)
--- Original had a simple while-loop wrapper and a TODO to make it better.
--- This replaces it with a state-machine/dispatcher pattern:
---   - Splits code into statements and wraps them in a numbered dispatch loop
---   - Makes static analysis and deobfuscation significantly harder
---   - Adds fake transition states to increase complexity
-
 local ControlFlowObfuscator = {}
+-- TODO : make it better
 
 math.randomseed(os.time())
 
-local CHARS = {"l","I","i","L"}
-local function rname(len)
-    len = len or 8
-    local t = {CHARS[math.random(#CHARS)]}
-    for i = 2, len do t[i] = CHARS[math.random(#CHARS)] end
-    return table.concat(t)
-end
+local function controlFlow(code, n, a, depth, depth_values)
+    n = n or math.floor(math.random() * 7000)
+    a = n
+    depth = depth or 0
+    depth_values = depth_values or {}
+    depth_values[#depth_values + 1] = {n, a}
 
--- Split code into individual statements (split on semicolons and newlines)
-local function splitStatements(code)
-    local stmts = {}
-    for line in (code .. "\n"):gmatch("([^\n]*)\n") do
-        local trimmed = line:match("^%s*(.-)%s*$")
-        if #trimmed > 0 then
-            stmts[#stmts + 1] = trimmed
-        end
-    end
-    return stmts
-end
-
--- Shuffle the execution order and build a dispatcher
-local function buildDispatcher(stmts)
-    -- Assign each statement a random state number
-    local n = #stmts
-    local states = {}
-    local used = {}
-
-    for i = 1, n do
-        local s
-        repeat s = math.random(1000, 9999) until not used[s]
-        used[s] = true
-        states[i] = s
+    local operators = {">", "<", "=="}
+    local while_operator = operators[math.random(1, 3)]
+    
+    local step = math.floor(math.random() * 990) + 10
+    local max_iterations = 3
+    if while_operator == "<" then
+        a = n + (step * max_iterations)
+    elseif while_operator == ">" then
+        a = n - (step * max_iterations)
+        if a < 0 then a = 0 end
+        step = -step
+    elseif while_operator == "==" then
+        a = n
+        if math.random() > 0.5 then step = -step end
     end
 
-    -- Insert some fake/dead states
-    local fake_count = math.floor(n * 0.3) + 2
-    local fake_states = {}
-    for i = 1, fake_count do
-        local s
-        repeat s = math.random(1000, 9999) until not used[s]
-        used[s] = true
-        fake_states[i] = s
+    local threshold = (n + step)
+
+    local src = depth == 0 and string.format(
+        "local thing = %d;\nlocal thing2 = %d;\nlocal counter = 0;\nlocal threshold = %d;\n",
+        n, a, threshold
+    ) or ""
+
+    src = src .. string.format(
+        "while thing %s thing2 and counter < %d do\n", 
+        while_operator, max_iterations
+    )
+    src = src .. string.format("    thing = thing + %d;\n", step)
+    src = src .. "    counter = counter + 1;\n"
+    src = src .. "    if thing < threshold then\n"
+
+    local function generateSpoof()
+        local spoof_lines = {
+            string.format("local temp = %d; temp = temp * 2;", math.floor(math.random() * 100)),
+            "local str = 'dummy'; str = str .. str;",
+            string.format("local x = %d; x = x - %d;", math.floor(math.random() * 50), math.floor(math.random() * 10)),
+            "local tbl = {1, 2, 3}; table.sort(tbl, function(a, b) return a > b end);"
+        }
+        return spoof_lines[math.random(1, #spoof_lines)]
     end
 
-    local state_var = rname(10)
-    local lines = {}
-    lines[#lines+1] = "local " .. state_var .. " = " .. states[1]
-    lines[#lines+1] = "while true do"
-
-    -- Real states
-    local first = true
-    for i = 1, n do
-        local kw = first and "if" or "elseif"
-        first = false
-        lines[#lines+1] = "  " .. kw .. " " .. state_var .. " == " .. states[i] .. " then"
-        lines[#lines+1] = "    " .. stmts[i]
-        local next_state = (i < n) and ("    " .. state_var .. " = " .. states[i+1]) or "    break"
-        lines[#lines+1] = next_state
+    if depth == (#code - 1) then
+        src = src .. string.format("        %s\n", generateSpoof())
+        src = src .. string.format("    else\n        %s\n        break\n", code[1])
+        table.remove(code, 1)
+    else
+        local sub_src, new_n, new_a = controlFlow(code, n, a, depth + 1, depth_values)
+        src = src .. string.format("        %s\n", generateSpoof())
+        src = src .. string.format("    else\n        %s\n        break\n", sub_src)
+        n = new_n
+        a = new_a
     end
 
-    -- Fake dead states (never reached)
-    for _, fs in ipairs(fake_states) do
-        lines[#lines+1] = "  elseif " .. state_var .. " == " .. fs .. " then"
-        lines[#lines+1] = "    local " .. rname() .. " = " .. math.random(1, 9999)
-        lines[#lines+1] = "    break"
+    src = src .. "    end\nend\n"
+
+    if math.random() > 0.5 then
+        src = src .. string.format("local dummy = 1; dummy = dummy + %d;\n", math.floor(math.random() * 10))
     end
 
-    lines[#lines+1] = "  else"
-    lines[#lines+1] = "    break"
-    lines[#lines+1] = "  end"
-    lines[#lines+1] = "end"
-
-    return table.concat(lines, "\n")
+    return depth == 0 and src or {src, n, a}
 end
 
 function ControlFlowObfuscator.process(code, max_fake_blocks)
@@ -89,14 +77,8 @@ function ControlFlowObfuscator.process(code, max_fake_blocks)
         error("Input code must be a string")
     end
 
-    local stmts = splitStatements(code)
-
-    -- For very short scripts (< 3 statements), fall back to simple wrap
-    if #stmts < 3 then
-        return code
-    end
-
-    return buildDispatcher(stmts)
+    local code_table = {code}
+    return controlFlow(code_table)
 end
 
 return ControlFlowObfuscator
