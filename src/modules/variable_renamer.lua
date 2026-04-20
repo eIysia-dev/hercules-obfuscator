@@ -1,129 +1,135 @@
+-- modules/variable_renamer.lua (improved)
+-- Key improvements:
+--   1. Collision-safe name generation
+--   2. Full Roblox/Luau global protection list
+--   3. String/comment protection during replacement
+--   4. Length-sorted replacements to avoid partial substitution bugs
+--   5. Visually confusing l/I/i charset for generated names
+
 local VariableRenamer = {}
-local varenc_names = {}
-local lua_functions = {
-    "assert", "collectgarbage", "dofile", "loadfile", "loadstring",
-    "ipairs", "pairs", "tonumber", "tostring", "type", "print",
-    "_G", "_VERSION", "write", "sort",
-    "math.abs", "math.acos", "math.asin", "math.atan", "math.atan2",
-    "math.ceil", "math.cos", "math.cosh", "math.deg", "math.exp",
-    "math.floor", "math.fmod", "math.frexp", "math.ldexp", "math.log",
-    "math.log10", "math.max", "math.min", "math.modf", "math.pi",
-    "math.pow", "math.rad", "math.random", "math.randomseed", "math.sin",
-    "math.sinh", "math.sqrt", "math.tan", "math.tanh",
-    "string.byte", "string.char", "string.dump", "string.find",
-    "string.format", "string.gmatch", "string.gsub", "string.len",
-    "string.lower", "string.match", "string.rep", "string.reverse",
-    "string.sub", "string.upper",
-    "table.concat", "table.insert", "table.remove", "table.sort",
-    "table.pack", "table.unpack", "game:GetService",
-}
+
+local used_names = {}
+
+-- All Lua + Luau/Roblox globals that must NOT be renamed
+local protected_set = {}
+for _, v in ipairs({
+    "assert","collectgarbage","dofile","error","ipairs","load",
+    "loadfile","loadstring","next","pairs","pcall","print",
+    "rawequal","rawget","rawlen","rawset","require","select",
+    "setfenv","setmetatable","getmetatable","tonumber","tostring",
+    "type","unpack","xpcall","_G","_VERSION","write","sort",
+    -- libraries
+    "math","string","table","io","os","package","coroutine",
+    "bit","bit32","utf8","debug",
+    -- Roblox globals
+    "game","workspace","script","Instance","Enum","Color3",
+    "Vector2","Vector3","CFrame","UDim","UDim2","Rect","Region3",
+    "Ray","TweenInfo","NumberSequence","ColorSequence",
+    "NumberSequenceKeypoint","ColorSequenceKeypoint",
+    "NumberRange","PhysicalProperties","BrickColor",
+    "tick","time","wait","delay","spawn","task",
+    "warn","typeof","newproxy","shared","plugin","settings",
+    "new","fromRGB","fromHSV","Angles","lookAt","identity",
+    -- math methods (referenced as math.X — protect base name)
+    "abs","acos","asin","atan","atan2","ceil","cos","cosh","deg","exp",
+    "floor","fmod","frexp","ldexp","log","log10","max","min","modf",
+    "pi","pow","rad","random","randomseed","sin","sinh","sqrt","tan","tanh",
+    -- string methods
+    "byte","char","dump","find","format","gmatch","gsub","len",
+    "lower","match","rep","reverse","sub","upper",
+    -- table methods
+    "concat","insert","remove","pack","unpack","move","create","resume",
+    "yield","status","isyieldable","running","wrap",
+}) do protected_set[v] = true end
 
 local reserved_words = {
-    ["if"] = true, ["then"] = true, ["else"] = true, ["elseif"] = true, ["end"] = true,
-    ["for"] = true, ["while"] = true, ["do"] = true, ["repeat"] = true, ["until"] = true,
-    ["function"] = true, ["local"] = true, ["return"] = true, ["break"] = true, ["continue"] = true,
-    ["and"] = true, ["or"] = true, ["not"] = true, ["in"] = true, ["nil"] = true,
-    ["true"] = true, ["false"] = true
+    ["if"]=true,["then"]=true,["else"]=true,["elseif"]=true,["end"]=true,
+    ["for"]=true,["while"]=true,["do"]=true,["repeat"]=true,["until"]=true,
+    ["function"]=true,["local"]=true,["return"]=true,["break"]=true,
+    ["continue"]=true,["and"]=true,["or"]=true,["not"]=true,
+    ["in"]=true,["nil"]=true,["true"]=true,["false"]=true,
 }
 
-local DEFAULT_MIN_NAME_LENGTH, DEFAULT_MAX_NAME_LENGTH = 8, 12
-local name_min, name_max = DEFAULT_MIN_NAME_LENGTH, DEFAULT_MAX_NAME_LENGTH
+local DEFAULT_MIN = 8
+local DEFAULT_MAX = 16
 
-local function generateRandomName()
-    local len = math.random(name_min, name_max)
-    local charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    local name = ""
-    for _ = 1, len do
-        local index = math.random(1, #charset)
-        name = name .. charset:sub(index, index)
-    end
+-- l/I/i visually ambiguous charset
+local CHARS = {"l","I","i","L"}
+
+local function generateName(min_len, max_len)
+    local name, attempts
+    repeat
+        attempts = (attempts or 0) + 1
+        local len = math.random(min_len, max_len)
+        local parts = {CHARS[math.random(#CHARS)]}
+        for j = 2, len do parts[j] = CHARS[math.random(#CHARS)] end
+        name = table.concat(parts)
+    until not used_names[name] and not reserved_words[name] and not protected_set[name]
+    used_names[name] = true
     return name
 end
 
-local function replaceUnquoted(input, target, replacement)
-    local placeholder = "!!!"
-    local protected_input = input:gsub('(["\'])(.-)%1', function(q, content)
-        content = content:gsub('\\"', '!@!'):gsub("\\'", "@!@")
-        content = content:gsub(target, placeholder)
-        content = content:gsub('!@!', '\\"'):gsub('@!@', "\\'")
-        return q .. content .. q
-    end)
-    local result = protected_input:gsub('(%f[%w_])' .. target .. '(%f[^%w_])', function(before, after)
-        return before .. replacement .. after
-    end)
-    result = result:gsub(placeholder, target)
-    return result
+-- Protect strings/comments, apply fn, restore
+local function withProtectedStrings(code, fn)
+    local slots, idx = {}, 0
+    local function save(s) idx=idx+1; slots[idx]=s; return "\0S"..idx.."\0" end
+
+    code = code:gsub("%[(=*)%[(.-)%]%1%]", function(eq,c) return save("["..eq.."["..c.."]"..eq.."]") end)
+    code = code:gsub('"(.-)"', function(s) return save('"'..s..'"') end)
+    code = code:gsub("'(.-)'", function(s) return save("'"..s.."'") end)
+    code = code:gsub("%-%-[^\n]*", function(s) return save(s) end)
+
+    code = fn(code)
+
+    code = code:gsub("\0S(%d+)\0", function(i) return slots[tonumber(i)] end)
+    return code
 end
 
-local function obfuscateLocalVariables(code)
-    local local_var_pattern = "local%s+([%w_,%s]+)%s*=%s*"
-    local var_map = {}
-    local obfuscated_code = code
-    for local_vars in code:gmatch(local_var_pattern) do
-        for var in local_vars:gmatch("[%w_]+") do
-            if #var > 1 and not varenc_names[var] and not reserved_words[var] then
-                var_map[var] = generateRandomName()
-            end
-        end
-    end
-    for original_var, obfuscated_var in pairs(var_map) do
-        obfuscated_code = replaceUnquoted(obfuscated_code, original_var, obfuscated_var)
-    end
-    return obfuscated_code, var_map
-end
-
-local function obfuscateFunctions(code)
-    local func_map = {}
-    local arg_map = {}
-    local obfuscated_code = code
-    for func_name, args in code:gmatch("function%s+([%w_]+)%s*%(([%w_,%s]*)%)") do
-        if not reserved_words[func_name] and not func_map[func_name] then
-            func_map[func_name] = generateRandomName()
-        end
-        for arg in args:gmatch("[%w_]+") do
-            if not reserved_words[arg] and not arg_map[arg] then
-                arg_map[arg] = generateRandomName()
-            end
-        end
-    end
-    obfuscated_code = obfuscated_code:gsub("function%s+([%w_]+)", function(func_name)
-        return "function " .. (func_map[func_name] or func_name)
-    end)
-    for original_func, obfuscated_func in pairs(func_map) do
-        obfuscated_code = obfuscated_code:gsub(original_func .. "%(", obfuscated_func .. "(")
-    end
-    for original_arg, obfuscated_arg in pairs(arg_map) do
-        obfuscated_code = replaceUnquoted(obfuscated_code, original_arg, obfuscated_arg)
-    end
-    return obfuscated_code
+local function safeReplace(src, old, new)
+    local escaped = old:gsub("[%(%)%.%+%-%*%?%[%]%^%$%%]", "%%%1")
+    return (src:gsub("%f[%w_]("..escaped..")%f[^%w_]", new))
 end
 
 function VariableRenamer.process(code, options)
     options = options or {}
-    -- apply custom name length range
-    name_min = options.min_length or DEFAULT_MIN_NAME_LENGTH
-    name_max = options.max_length or DEFAULT_MAX_NAME_LENGTH
-    local renamed_vars = {}
-    local assignment_lines = {}
-    local obfuscated_code, var_map = obfuscateLocalVariables(code)
-    obfuscated_code = obfuscateFunctions(obfuscated_code)
-    for _, function_name in ipairs(lua_functions) do
-        if string.find(code, function_name, 1, true) then
-            if not varenc_names[function_name] then
-                local new_name = generateRandomName()
-                varenc_names[function_name] = new_name
-                table.insert(renamed_vars, new_name)
-                table.insert(assignment_lines, new_name .. " = " .. function_name .. ";")
-            end
-            obfuscated_code = obfuscated_code:gsub(function_name .. "%(", varenc_names[function_name] .. "(")
+    local min_len = options.min_length or DEFAULT_MIN
+    local max_len = options.max_length or DEFAULT_MAX
+
+    used_names = {}
+    local var_map = {}
+
+    local function addMapping(name)
+        if #name > 1 and not reserved_words[name] and not protected_set[name] and not var_map[name] then
+            var_map[name] = generateName(min_len, max_len)
         end
     end
-    local local_declaration = #renamed_vars > 0 and "local " .. table.concat(renamed_vars, ", ") or ""
-    local assignments = #assignment_lines > 0 and "\n" .. table.concat(assignment_lines, " ") or ""
-    local result = local_declaration .. assignments .. "\n" .. obfuscated_code
-    -- reset to defaults
-    name_min, name_max = DEFAULT_MIN_NAME_LENGTH, DEFAULT_MAX_NAME_LENGTH
-    return result
+
+    -- Collect local vars
+    for vars in code:gmatch("local%s+([%w_,%s]+)%s*=") do
+        for v in vars:gmatch("[%w_]+") do addMapping(v) end
+    end
+    -- Collect function names + params
+    for fname, params in code:gmatch("local%s+function%s+([%w_]+)%s*%(([^%)]*)%)") do
+        addMapping(fname)
+        for p in params:gmatch("[%w_]+") do addMapping(p) end
+    end
+    for fname, params in code:gmatch("function%s+([%w_]+)%s*%(([^%)]*)%)") do
+        if not fname:match("[:%.]") then addMapping(fname) end
+        for p in params:gmatch("[%w_]+") do addMapping(p) end
+    end
+
+    code = withProtectedStrings(code, function(src)
+        -- Sort longest-first to avoid partial replacements (e.g. "foo" inside "fooBar")
+        local sorted = {}
+        for old, new in pairs(var_map) do sorted[#sorted+1] = {old=old,new=new} end
+        table.sort(sorted, function(a,b) return #a.old > #b.old end)
+        for _, pair in ipairs(sorted) do
+            src = safeReplace(src, pair.old, pair.new)
+        end
+        return src
+    end)
+
+    return code
 end
 
 return VariableRenamer
