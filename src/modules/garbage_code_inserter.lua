@@ -1,87 +1,91 @@
+-- modules/garbage_code_inserter.lua (improved)
+-- Improvements over original:
+--   1. Injects garbage BETWEEN lines (not just prefix/suffix) - harder to strip
+--   2. More varied and realistic-looking dead code patterns
+--   3. Uses l/I/i confusing names to blend with obfuscated vars
+--   4. Density scales with code size
+
 local GarbageCodeInserter = {}
 
-local LOWERCASE_A, LOWERCASE_Z = 97, 122
-local MAX_RANDOM_NUMBER = 100
-local MAX_LOOP_COUNT = 10
-local VARIABLE_NAME_LENGTH = 6
-
-local function generateRandomVariableName()
-    local name = {}
-    for i = 1, VARIABLE_NAME_LENGTH do
-        table.insert(name, string.char(math.random(LOWERCASE_A, LOWERCASE_Z)))
-    end
-    return table.concat(name)
+local CHARS = {"l","I","i","L"}
+local function rname(len)
+    len = len or 6
+    local t = {}
+    for i = 1, len do t[i] = CHARS[math.random(#CHARS)] end
+    return table.concat(t)
 end
 
-local function generateRandomNumber(max)
-    return math.random(1, max or MAX_RANDOM_NUMBER)
-end
+local function rnum(max) return math.random(1, max or 100) end
 
-local code_types = {
-    variable = function()
-        return string.format("local %s = %d", generateRandomVariableName(), generateRandomNumber())
+local generators = {
+    function() return string.format("local %s = %d", rname(), rnum()) end,
+    function() return string.format("local %s = %d * %d + %d", rname(), rnum(50), rnum(10), rnum(20)) end,
+    function() return string.format("if false then local %s = %d end", rname(), rnum()) end,
+    function() return string.format("do local %s = {} end", rname()) end,
+    function()
+        return string.format("local %s = (function() return %d end)()", rname(), rnum())
     end,
-    while_loop = function()
-        return string.format("while %s do local _ = %d break end",
-            tostring(math.random() > 0.5),
-            generateRandomNumber(100)
-        )
+    function()
+        return string.format("local %s = math.floor(%d / %d)", rname(), rnum(999), rnum(9) + 1)
     end,
-    for_loop = function()
-        return string.format("for %s = 1, %d do local _ = %d end",
-            generateRandomVariableName(),
-            generateRandomNumber(MAX_LOOP_COUNT),
-            generateRandomNumber()
-        )
+    function()
+        return string.format("local %s = {%d, %d, %d}", rname(), rnum(), rnum(), rnum())
     end,
-    if_statement = function()
-        return string.format("if %s then local _ = %d end",
-            tostring(math.random() > 0.5),
-            generateRandomNumber()
-        )
+    function()
+        return string.format("local %s = tostring(%d)", rname(), rnum())
     end,
-    function_def = function()
-        return string.format("local function %s(%s) local _ = %d end",
-            generateRandomVariableName(),
-            generateRandomVariableName(),
-            generateRandomNumber()
-        )
-    end
+    function()
+        return string.format("if %d > %d then else end", rnum(50), rnum(50) + 51)
+    end,
+    function()
+        local n1, n2 = rnum(999), rnum(999)
+        return string.format("local %s = %d + %d - %d", rname(), n1, n2, n1)
+    end,
 }
 
-local code_type_keys = {}
-for k in pairs(code_types) do table.insert(code_type_keys, k) end
-
-local function generateRandomCode()
-    return code_types[code_type_keys[math.random(#code_type_keys)]]()
-end
-
-local function generateGarbage(blocks, sep)
-    sep = sep or "\n"
-    local garbage_code = {}
-    for i = 1, blocks do
-        local code = generateRandomCode()
-        if not code:match("while true") and not code:match("for %w+ = %d+, %d+ do local _ = %d+ end") then
-            table.insert(garbage_code, code)
-        end
+local function makeGarbage(n)
+    local lines = {}
+    for i = 1, n do
+        lines[i] = generators[math.random(#generators)]()
     end
-    return table.concat(garbage_code, sep)
+    return lines
 end
 
 function GarbageCodeInserter.process(code, garbage_blocks)
     if type(code) ~= "string" or #code == 0 then
         error("Input code must be a non-empty string", 2)
     end
-    if type(garbage_blocks) ~= "number" then
-        error("garbage_blocks must be a number", 2)
-    end
-    local prefix_garbage = generateGarbage(garbage_blocks)
-    local suffix_garbage = generateGarbage(garbage_blocks)
-    return table.concat({prefix_garbage, code, suffix_garbage}, "\n")
-end
+    garbage_blocks = garbage_blocks or 20
 
-function GarbageCodeInserter.setSeed(seed)
-    math.randomseed(seed)
+    local lines = {}
+    for line in (code .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+
+    local result = {}
+
+    -- Prefix block
+    for _, g in ipairs(makeGarbage(math.floor(garbage_blocks * 0.4))) do
+        result[#result + 1] = g
+    end
+
+    -- Inject inline between real lines
+    local inject_every = math.max(3, math.floor(#lines / (garbage_blocks * 0.3)))
+    for i, line in ipairs(lines) do
+        result[#result + 1] = line
+        if i % inject_every == 0 then
+            for _, g in ipairs(makeGarbage(math.random(1, 2))) do
+                result[#result + 1] = g
+            end
+        end
+    end
+
+    -- Suffix block
+    for _, g in ipairs(makeGarbage(math.floor(garbage_blocks * 0.4))) do
+        result[#result + 1] = g
+    end
+
+    return table.concat(result, "\n")
 end
 
 return GarbageCodeInserter
