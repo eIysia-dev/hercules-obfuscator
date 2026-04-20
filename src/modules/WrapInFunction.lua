@@ -1,5 +1,7 @@
 local Wrapper = {}
+
 function Wrapper.process(code)
-return [[return (function(...) ]]..code..[[ end)(...)]]
+    return "local _args={...} return (function(...) " .. code .. " end)(table.unpack(_args))"
 end
+
 return Wrapper
