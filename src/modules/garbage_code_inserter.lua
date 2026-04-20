@@ -7,8 +7,17 @@ local VARIABLE_NAME_LENGTH = 6
 
 local function generateRandomVariableName()
     local name = {}
-    for i = 1, VARIABLE_NAME_LENGTH do
-        table.insert(name, string.char(math.random(LOWERCASE_A, LOWERCASE_Z)))
+    -- first char must be a letter
+    name[1] = string.char(math.random(LOWERCASE_A, LOWERCASE_Z))
+    for i = 2, VARIABLE_NAME_LENGTH do
+        local r = math.random(1, 3)
+        if r == 1 then
+            name[i] = string.char(math.random(LOWERCASE_A, LOWERCASE_Z))
+        elseif r == 2 then
+            name[i] = string.char(math.random(65, 90))
+        else
+            name[i] = string.char(math.random(48, 57))
+        end
     end
     return table.concat(name)
 end
@@ -17,9 +26,21 @@ local function generateRandomNumber(max)
     return math.random(1, max or MAX_RANDOM_NUMBER)
 end
 
+local dead_values = {
+    function() return string.format("local %s = nil; if %s ~= nil then error('x') end", generateRandomVariableName(), generateRandomVariableName()) end,
+    function() return string.format("local %s = {%d,%d,%d}", generateRandomVariableName(), generateRandomNumber(), generateRandomNumber(), generateRandomNumber()) end,
+    function() return string.format("local %s = tostring(%d)", generateRandomVariableName(), generateRandomNumber()) end,
+    function() return string.format("local %s = math.floor(%d.%d)", generateRandomVariableName(), generateRandomNumber(), generateRandomNumber()) end,
+    function() return string.format("local %s = type(nil) == 'nil'", generateRandomVariableName()) end,
+    function() return string.format("local %s = string.len('%s')", generateRandomVariableName(), generateRandomVariableName()) end,
+}
+
 local code_types = {
     variable = function()
         return string.format("local %s = %d", generateRandomVariableName(), generateRandomNumber())
+    end,
+    dead_assign = function()
+        return dead_values[math.random(#dead_values)]()
     end,
     while_loop = function()
         return string.format("while %s do local _ = %d break end",
@@ -46,7 +67,13 @@ local code_types = {
             generateRandomVariableName(),
             generateRandomNumber()
         )
-    end
+    end,
+    do_block = function()
+        return string.format("do local %s = %d local %s = %s + 1 end",
+            generateRandomVariableName(), generateRandomNumber(),
+            generateRandomVariableName(), generateRandomVariableName()
+        )
+    end,
 }
 
 local code_type_keys = {}
@@ -60,10 +87,7 @@ local function generateGarbage(blocks, sep)
     sep = sep or "\n"
     local garbage_code = {}
     for i = 1, blocks do
-        local code = generateRandomCode()
-        if not code:match("while true") and not code:match("for %w+ = %d+, %d+ do local _ = %d+ end") then
-            table.insert(garbage_code, code)
-        end
+        table.insert(garbage_code, generateRandomCode())
     end
     return table.concat(garbage_code, sep)
 end
@@ -78,6 +102,26 @@ function GarbageCodeInserter.process(code, garbage_blocks)
     local prefix_garbage = generateGarbage(garbage_blocks)
     local suffix_garbage = generateGarbage(garbage_blocks)
     return table.concat({prefix_garbage, code, suffix_garbage}, "\n")
+end
+
+-- Scatter garbage between lines of existing code
+function GarbageCodeInserter.scatter(code, density)
+    if type(code) ~= "string" or #code == 0 then
+        error("Input code must be a non-empty string", 2)
+    end
+    density = density or 3
+    local lines = {}
+    for line in (code .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+    local result = {}
+    for _, line in ipairs(lines) do
+        result[#result + 1] = line
+        if math.random(1, 10) <= density then
+            result[#result + 1] = generateRandomCode()
+        end
+    end
+    return table.concat(result, "\n")
 end
 
 function GarbageCodeInserter.setSeed(seed)
