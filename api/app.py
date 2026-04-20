@@ -10,7 +10,9 @@ from functools import wraps
 app = Flask(__name__)
 
 API_KEY = os.environ.get("HERCULES_API_KEY", "")
-HERCULES_DIR = os.environ.get("HERCULES_DIR", os.path.dirname(__file__))
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+HERCULES_DIR = os.path.join(BASE_DIR, "src")
 HERCULES_SCRIPT = os.path.join(HERCULES_DIR, "hercules.lua")
 
 MAX_CODE_SIZE = int(os.environ.get("MAX_CODE_SIZE", 500_000))
