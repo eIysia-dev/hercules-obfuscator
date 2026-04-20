@@ -1,7 +1,5 @@
 local Wrapper = {}
-
 function Wrapper.process(code)
-    return "local f=function(...) " .. code .. " end return f(...)"
+return [[return (function(...) ]]..code..[[ end)(...)]]
 end
-
 return Wrapper
