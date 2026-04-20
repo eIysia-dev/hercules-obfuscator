@@ -82,7 +82,12 @@ def obfuscate():
         with open(input_path, "w", encoding="utf-8") as f:
             f.write(code)
 
-        cmd = ["lua5.1", HERCULES_SCRIPT, input_path] + flags
+        cmd = [
+            "lua5.1",
+            HERCULES_SCRIPT,
+            input_path,
+            "--api"   # 🔥 FORCE API MODE ALWAYS
+        ] + flags
 
         proc = subprocess.run(
             cmd,
@@ -93,23 +98,27 @@ def obfuscate():
             env={**os.environ, "LUA_PATH": f"{HERCULES_DIR}/?.lua;;"},
         )
 
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+
         if proc.returncode != 0:
             return jsonify({
                 "error": "Obfuscation failed",
-                "details": (proc.stderr or proc.stdout or "")[:2000]
+                "details": stderr[:2000] or stdout[:2000]
             }), 500
 
-        result = (proc.stdout or "").strip()
-
-        if not result:
+        # 🔥 HARD VALIDATION: ensure it's actually Lua
+        if not stdout or "error" in stdout.lower():
             return jsonify({
-                "error": "Empty output from obfuscator"
+                "error": "Invalid obfuscator output",
+                "raw": stdout[:2000]
             }), 500
 
         return jsonify({
-            "obfuscated": result,
+            "obfuscated_code": stdout,   # ✅ CLEAN FIELD NAME
             "original_size": len(code),
-            "obfuscated_size": len(result),
+            "obfuscated_size": len(stdout),
+            "success": True
         })
 
     except subprocess.TimeoutExpired:
@@ -124,7 +133,6 @@ def obfuscate():
             os.rmdir(tmp_dir)
         except:
             pass
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
