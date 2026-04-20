@@ -6,16 +6,7 @@ do
     local D,T,P,X,S,E,R,Pa,GM,SM,RG,RS,RE,CG,Sel,C,G=  
         debug,type,pcall,xpcall,tostring,error,rawget,pairs,  
         getmetatable,setmetatable,rawget,rawset,rawequal,collectgarbage,select,coroutine,_G  
-  
-    local function dbgOK()  
-        if T(D)~="table" then return false end  
-        for _,k in Pa{"getinfo","getlocal","getupvalue","traceback","sethook","setupvalue","getregistry"} do  
-            if T(D[k])~="function" then return false end  
-        end  
-        return true  
-    end  
-    if not dbgOK() then E("Tamper Detected! Reason: Debug library incomplete") return end  
-  
+    
     local function isNative(f)  
         local i=D.getinfo(f)  
         return i and i.what=="C"  
