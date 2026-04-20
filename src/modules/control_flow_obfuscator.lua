@@ -37,61 +37,83 @@ end
 -- dispatches to each block in order. Automated flattening tools struggle with this
 -- because the state transitions are data-dependent.
 local function buildDispatcher(code)
-    -- Split into lines/chunks
     local chunks = {}
-    local current = {}
-    for line in (code .. "\n"):gmatch("([^\n]*)\n") do
-        local trimmed = line:match("^%s*(.-)%s*$")
-        if trimmed ~= "" then
-            current[#current+1] = line
-            -- Group ~3 lines per block to reduce bloat
-            if #current >= math.random(2, 4) then
-                chunks[#chunks+1] = table.concat(current, "\n")
-                current = {}
-            end
-        end
-    end
-    if #current > 0 then
-        chunks[#chunks+1] = table.concat(current, "\n")
-    end
+    local buffer = {}
 
-    if #chunks == 0 then return code end
-
-    -- Assign shuffled state IDs
-    local stateIds = {}
-    for i = 1, #chunks do stateIds[i] = i * math.random(10, 99) + math.random(1, 9) end
-    -- Shuffle
-    for i = #stateIds, 2, -1 do
-        local j = math.random(1, i)
-        stateIds[i], stateIds[j] = stateIds[j], stateIds[i]
-    end
-
-    local stateVar   = randName()
-    local doneState  = math.random(9000, 99999)
+    -- Split into lines first (safe preprocessing only)
     local lines = {}
-    lines[#lines+1] = string.format("local %s = %d", stateVar, stateIds[1])
-    lines[#lines+1] = string.format("while %s ~= %d do", stateVar, doneState)
-
-    for i, chunk in ipairs(chunks) do
-        local thisState = stateIds[i]
-        local nextState = i < #chunks and stateIds[i+1] or doneState
-        lines[#lines+1] = string.format("    if %s == %d then", stateVar, thisState)
-        -- Indent the chunk
-        for l in (chunk .. "\n"):gmatch("([^\n]*)\n") do
-            lines[#lines+1] = "        " .. l
-        end
-        -- Sprinkle an opaque check before state transition for extra confusion
-        if math.random() < 0.4 then
-            local dead = randName()
-            lines[#lines+1] = string.format("        if not (%s) then local %s=nil end",
-                opaqueTrue(), dead)
-        end
-        lines[#lines+1] = string.format("        %s = %d", stateVar, nextState)
-        lines[#lines+1] = "    end"
+    for line in (code .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
     end
 
-    lines[#lines+1] = "end"
-    return table.concat(lines, "\n")
+    -- Build chunks ONLY at safe boundaries
+    local function isBoundary(line)
+        local trimmed = line:match("^%s*(.-)%s*$") or ""
+
+        return trimmed == "end"
+            or trimmed == "else"
+            or trimmed:match("^elseif%s")
+            or trimmed:match("^return")
+            or trimmed:match("^function%s")
+            or trimmed == "break"
+    end
+
+    for i = 1, #lines do
+        local line = lines[i]
+        buffer[#buffer + 1] = line
+
+        -- only split if:
+        -- 1) buffer is big enough
+        -- 2) AND we're at a safe boundary
+        if #buffer >= math.random(6, 12) and isBoundary(line) then
+            chunks[#chunks + 1] = table.concat(buffer, "\n")
+            buffer = {}
+        end
+    end
+
+    -- flush remaining
+    if #buffer > 0 then
+        chunks[#chunks + 1] = table.concat(buffer, "\n")
+    end
+
+    if #chunks == 0 then
+        return code
+    end
+
+    -- stable state IDs (no random reshuffle corruption anymore)
+    local stateIds = {}
+    for i = 1, #chunks do
+        stateIds[i] = i * 100 + math.random(1, 50)
+    end
+
+    local stateVar = randName()
+    local doneState = math.random(90000, 99999)
+
+    local out = {}
+
+    -- init state
+    out[#out + 1] = string.format("local %s = %d", stateVar, stateIds[1])
+    out[#out + 1] = string.format("while %s ~= %d do", stateVar, doneState)
+
+    for i = 1, #chunks do
+        local thisState = stateIds[i]
+        local nextState = stateIds[i + 1] or doneState
+
+        out[#out + 1] = string.format("    if %s == %d then", stateVar, thisState)
+
+        -- inject chunk safely (NO modification of syntax)
+        for line in chunks[i]:gmatch("[^\n]+") do
+            out[#out + 1] = "        " .. line
+        end
+
+        -- safe state transition (no opaque injection inside control flow)
+        out[#out + 1] = string.format("        %s = %d", stateVar, nextState)
+        out[#out + 1] = "    end"
+    end
+
+    out[#out + 1] = "end"
+
+    return table.concat(out, "\n")
 end
 
 -- Wrap with opaque predicates at the outermost layer
