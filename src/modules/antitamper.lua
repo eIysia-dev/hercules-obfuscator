@@ -1,56 +1,43 @@
 local AntiTamper = {}
 
 function AntiTamper.process(code)
-    local wrapper = [[
-local function __fail(reason)
-    error("Integrity Check Failed: " .. tostring(reason))
+
+local anti_tamper_code = [[
+
+local co1 = coroutine.create(function() end)
+local co2 = coroutine.create(function() end)
+
+if type(co1) ~= "thread" or type(co2) ~= "thread" then
+    return
 end
 
--- Safe environment (restricted sandbox)
-local env = {
-    print = print,
-    warn = warn,
-    tonumber = tonumber,
-    tostring = tostring,
-    pairs = pairs,
-    ipairs = ipairs,
-    math = math,
-    string = string,
-    table = table,
-    type = type,
-    pcall = pcall,
-    xpcall = xpcall,
-    select = select,
+local f1 = function() end
+local f2 = function() end
 
-    -- explicitly blocked
-    os = nil,
-    io = nil,
-    debug = nil,
-    getfenv = nil,
-    setfenv = nil,
-    loadstring = nil,
-    require = require,
-}
-
--- compile user code
-local fn, err = loadstring(USER_CODE)
-if not fn then
-    __fail("compile error: " .. tostring(err))
+if type(f1) ~= "function" or type(f2) ~= "function" then
+    return
 end
 
-setfenv(fn, env)
+if type(debug) ~= "table" then
+    return
+end
 
-local ok, err2 = pcall(fn)
+local ok = pcall(function()
+    local p = Instance.new("Part")
+    return p:GetMass()
+end)
+
 if not ok then
-    __fail(err2)
+    return
 end
+
+
 ]]
 
-    -- inject user code safely
-    local escaped = code:gsub("\\", "\\\\")
-    wrapper = wrapper:gsub("USER_CODE", string.format("[[%s]]", escaped))
+return anti_tamper_code .. "\n" .. code
 
-    return wrapper
 end
 
 return AntiTamper
+
+how come it print "hello" showed up in env log
